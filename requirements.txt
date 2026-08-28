@@ -1,0 +1,17 @@
+# Traitement audio (multiplateforme)
+numpy>=1.26
+soundfile>=0.12
+
+# Extraction de texte depuis images (modèle vision via OpenRouter)
+openai>=1.40
+
+# Synthèse vocale — Apple Silicon uniquement
+mlx-audio>=0.2
+# Tokenizer tekken requis par le modèle Voxtral TTS de mlx-audio
+mistral-common[audio]>=1.11
+
+# OCR local optionnel (--ocr local), macOS uniquement
+# ocrmac>=1.0
+
+# Binaire système requis pour les tests:
+#   brew install ffmpeg

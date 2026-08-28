@@ -1,0 +1,20 @@
+{
+  "name": "lecteur-video-remotion",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Composition Remotion — gabarit Bandeau télé 1080x1920",
+  "scripts": {
+    "studio": "remotion studio",
+    "render": "remotion render src/index.ts BandeauTele out/video.mp4"
+  },
+  "dependencies": {
+    "@remotion/cli": "4.0.518",
+    "react": "19.2.8",
+    "react-dom": "19.2.8",
+    "remotion": "4.0.518"
+  },
+  "devDependencies": {
+    "@types/react": "19.2.18",
+    "typescript": "5.9.3"
+  }
+}
