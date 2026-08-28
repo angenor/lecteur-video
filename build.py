@@ -80,6 +80,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     p.add_argument("--voice", choices=["female", "male"], default="male")
     p.add_argument("--tts-model", default=TTS.DEFAULT_MODEL)
+    p.add_argument("--fresh", action="store_true",
+                   help="Resynthétise tout, sans réutiliser les .wav existants")
     p.add_argument("--max-chars", type=int, default=SEG.MAX_CHARS,
                    help="Longueur max d'un segment (contrainte du gabarit)")
     p.add_argument("--gap", type=float, default=TTS.GAP_BETWEEN,
@@ -159,6 +161,7 @@ def main(argv: list[str] | None = None) -> int:
         segments, outdir / "audio",
         model_id=args.tts_model,
         voice=TTS.VOICES[args.voice],
+        reuse=not args.fresh,
         on_progress=progress("segments"),
     )
     TTS.assign_timings(segments, gap=args.gap)

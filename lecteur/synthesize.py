@@ -24,6 +24,7 @@ LENGTH_SAFETY = 3.0           # marge tolérée au-delà de la durée attendue
 MIN_FRAMES = 120              # plancher, pour les segments très courts
 MODEL_MAX_FRAMES = 4096       # plafond du modèle
 RETRY_TEMPERATURES = (0.8, 0.4, 0.15)
+DRIFT_FACTOR = 1.8            # au-delà, la voix a dérivé
 
 GAP_BETWEEN = 0.28  # respiration entre deux segments, en secondes
 LEAD_IN = 0.6       # silence avant le premier mot
@@ -44,6 +45,11 @@ def _load_model(model_id: str):
     return load(model_id)
 
 
+def _expected_duration(text: str) -> float:
+    """Durée de lecture plausible du texte, en secondes."""
+    return len(text) / CHARS_PER_SECOND + 1.0
+
+
 def _frame_budget(text: str) -> int:
     """Nombre maximal de frames audio autorisé pour ce texte.
 
@@ -53,15 +59,27 @@ def _frame_budget(text: str) -> int:
     frames, soit 5 min d'audio pour une phrase de 6 secondes). On borne le
     budget à trois fois la durée attendue du texte.
     """
-    expected = len(text) / CHARS_PER_SECOND + 1.0
-    budget = int(expected * LENGTH_SAFETY * SAMPLE_RATE / SAMPLES_PER_FRAME)
+    budget = int(
+        _expected_duration(text) * LENGTH_SAFETY * SAMPLE_RATE / SAMPLES_PER_FRAME
+    )
     return max(MIN_FRAMES, min(budget, MODEL_MAX_FRAMES))
+
+
+def _has_drifted(text: str, duration: float) -> bool:
+    """Vrai si l'audio dure trop longtemps pour son texte.
+
+    Le modèle part parfois en roue libre: il ajoute des chuchotements et des
+    apartés adressés à un tiers avant de conclure. Le symptôme mesurable est
+    un débit effondré — 4 à 6 caractères par seconde au lieu des 11 à 21
+    d'une lecture saine. Se fier au seul plafond de frames ne suffit pas: une
+    dérive peut s'arrêter juste en dessous.
+    """
+    return duration > _expected_duration(text) * DRIFT_FACTOR
 
 
 def _generate_one(model, text: str, voice: str) -> np.ndarray:
     budget = _frame_budget(text)
-    ceiling = budget * SAMPLES_PER_FRAME
-    longest: np.ndarray | None = None
+    shortest: np.ndarray | None = None
 
     for temperature in RETRY_TEMPERATURES:
         chunks: list[np.ndarray] = []
@@ -73,23 +91,38 @@ def _generate_one(model, text: str, voice: str) -> np.ndarray:
             continue
 
         audio = np.concatenate(chunks)
-        if longest is None or len(audio) > len(longest):
-            longest = audio
+        if shortest is None or len(audio) < len(shortest):
+            shortest = audio
 
-        # Sous le plafond: le modèle a bien conclu de lui-même.
-        if len(audio) < ceiling * 0.98:
+        if not _has_drifted(text, len(audio) / SAMPLE_RATE):
             return audio
 
         print(
-            f"\n  voix emballée sur {text[:40]!r} "
+            f"\n  voix dérivée sur {text[:40]!r} "
             f"(temperature={temperature}), nouvelle tentative"
         )
 
-    if longest is None:
+    if shortest is None:
         raise SynthesisError(f"Aucun audio généré pour: {text[:60]!r}")
 
-    print(f"\n  segment tronqué au budget: {text[:60]!r}")
-    return longest
+    # Toutes les tentatives ont dérivé: on garde la moins bavarde.
+    print(f"\n  segment à revérifier: {text[:60]!r}")
+    return shortest
+
+
+def _reusable(dest: Path, text: str) -> np.ndarray | None:
+    """Relit un segment déjà synthétisé, s'il est exploitable."""
+    if not dest.exists():
+        return None
+    try:
+        audio, sr = sf.read(dest, dtype="float32")
+    except Exception:
+        return None
+    if sr != SAMPLE_RATE or audio.ndim > 1 or len(audio) == 0:
+        return None
+    if _has_drifted(text, len(audio) / SAMPLE_RATE):
+        return None
+    return audio
 
 
 def synthesize(
@@ -98,15 +131,28 @@ def synthesize(
     *,
     model_id: str = DEFAULT_MODEL,
     voice: str = "fr_male",
+    reuse: bool = True,
     on_progress=None,
 ) -> list[TextSegment]:
+    """Synthétise chaque segment, en reprenant le travail déjà fait.
+
+    Avec *reuse*, un .wav déjà présent et de durée plausible est conservé:
+    une relance ne régénère que les segments manquants ou dérivés, au lieu de
+    reprendre les vingt minutes depuis le début.
+    """
     workdir.mkdir(parents=True, exist_ok=True)
-    model = _load_model(model_id)
+    model = None  # chargé à la première synthèse réellement nécessaire
 
     for i, seg in enumerate(segments, start=1):
-        audio = _generate_one(model, seg.text, voice)
         dest = workdir / f"seg_{seg.index:04d}.wav"
-        sf.write(dest, audio, SAMPLE_RATE)
+        audio = _reusable(dest, seg.text) if reuse else None
+
+        if audio is None:
+            if model is None:
+                model = _load_model(model_id)
+            audio = _generate_one(model, seg.text, voice)
+            sf.write(dest, audio, SAMPLE_RATE)
+
         seg.audio_path = str(dest)
         seg.duration = len(audio) / SAMPLE_RATE
         if on_progress:
