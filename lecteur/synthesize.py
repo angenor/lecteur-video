@@ -111,8 +111,16 @@ def _generate_one(model, text: str, voice: str) -> np.ndarray:
 
 
 def _reusable(dest: Path, text: str) -> np.ndarray | None:
-    """Relit un segment déjà synthétisé, s'il est exploitable."""
-    if not dest.exists():
+    """Relit un segment déjà synthétisé, s'il est exploitable.
+
+    Le .txt jumeau garde le texte qui a produit le .wav: les numéros de
+    segment bougent dès que le découpage change, et sans cette vérification
+    on rejouerait l'audio d'une autre phrase.
+    """
+    sidecar = dest.with_suffix(".txt")
+    if not dest.exists() or not sidecar.exists():
+        return None
+    if sidecar.read_text(encoding="utf-8") != text:
         return None
     try:
         audio, sr = sf.read(dest, dtype="float32")
@@ -152,6 +160,7 @@ def synthesize(
                 model = _load_model(model_id)
             audio = _generate_one(model, seg.text, voice)
             sf.write(dest, audio, SAMPLE_RATE)
+            dest.with_suffix(".txt").write_text(seg.text, encoding="utf-8")
 
         seg.audio_path = str(dest)
         seg.duration = len(audio) / SAMPLE_RATE

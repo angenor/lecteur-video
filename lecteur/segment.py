@@ -158,7 +158,12 @@ def _best_boundary(words: list[str], max_chars: int) -> int:
 
 
 def _merge_stubs(pieces: list[str], max_chars: int) -> list[str]:
-    """Recolle les fragments trop courts au voisin, si ça tient."""
+    """Recolle les fragments trop courts au voisin, si ça tient.
+
+    À n'appliquer qu'aux morceaux d'une même phrase: recoller par-dessus un
+    point produirait des segments à cheval sur deux phrases, du type
+    « ... servir votre communauté. Depuis 2016, ».
+    """
     out: list[str] = []
     for piece in pieces:
         if out and len(piece) < MIN_CHARS:
@@ -167,6 +172,12 @@ def _merge_stubs(pieces: list[str], max_chars: int) -> list[str]:
                 out[-1] = joined
                 continue
         out.append(piece)
+
+    # Le premier morceau n'a pas de voisin gauche: il se rabat sur sa droite.
+    if len(out) > 1 and len(out[0]) < MIN_CHARS:
+        joined = f"{out[0]} {out[1]}"
+        if len(joined) <= max_chars:
+            out[:2] = [joined]
     return out
 
 
@@ -179,9 +190,10 @@ def segment(text: str, *, max_chars: int = MAX_CHARS) -> list[TextSegment]:
         for sentence in SENTENCE_SPLIT.split(paragraph):
             sentence = sentence.strip()
             if sentence:
-                pieces.extend(_split_long(sentence, max_chars))
-
-    pieces = _merge_stubs(pieces, max_chars)
+                # fusion confinée à la phrase, pour ne jamais franchir un point
+                pieces.extend(
+                    _merge_stubs(_split_long(sentence, max_chars), max_chars)
+                )
 
     segments: list[TextSegment] = []
     for i, piece in enumerate(pieces):
