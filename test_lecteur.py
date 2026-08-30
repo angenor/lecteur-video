@@ -5,7 +5,7 @@ import tempfile
 from pathlib import Path
 
 from lecteur.extract import clean_text
-from lecteur.segment import MAX_CHARS, font_size_for, segment
+from lecteur.segment import MAX_CHARS, all_cards, font_size_for, segment, utterances
 from lecteur.synthesize import assign_timings
 from lecteur.segment import TextSegment
 from lecteur.timeline import Meta, build
@@ -84,6 +84,41 @@ def test_timings():
     print("  timings OK")
 
 
+def test_phrases_restent_entieres():
+    """Une phrase longue se lit d'un trait, même si elle s'affiche en 2 cartes."""
+    texte = (
+        "Vous n'êtes pas des suiveurs motivés par l'argent, car je ne vous "
+        "rémunère pas, et je ne vous ai jamais rien promis en retour."
+    )
+    units = utterances(texte)
+    assert len(units) == 1, [u.text for u in units]
+    assert len(units[0].cards) > 1, "une phrase de 130 caractères tient sur 2 cartes"
+    assert units[0].text == texte
+
+
+def test_cartes_couvrent_leur_enonce():
+    """Les cartes se relaient exactement sur la durée de l'audio."""
+    units = utterances(
+        "Première phrase courte. Une deuxième phrase, nettement plus longue "
+        "que la première, qui devra donc s'afficher en plusieurs cartes."
+    )
+    for u in units:
+        u.duration = len(u.text) / 15.0
+    assign_timings(units, gap=0.5, lead_in=1.0)
+
+    for u in units:
+        assert u.cards[0].start == u.start
+        assert abs(u.cards[-1].end - u.end) < 1e-9, (u.cards[-1].end, u.end)
+        for gauche, droite in zip(u.cards, u.cards[1:]):
+            assert abs(gauche.end - droite.start) < 1e-9
+        assert all(c.duration > 0 for c in u.cards)
+
+    cartes = all_cards(units)
+    for gauche, droite in zip(cartes, cartes[1:]):
+        assert gauche.end <= droite.start + 1e-9
+    print(f"  cartes réparties OK ({len(units)} énoncés, {len(cartes)} cartes)")
+
+
 def test_envelope_follows_audio():
     """Une sinusoïde suivie d'un silence: l'enveloppe doit chuter."""
     with tempfile.TemporaryDirectory() as tmp:
@@ -125,6 +160,8 @@ if __name__ == "__main__":
         test_no_word_lost,
         test_very_long_sentence_without_punctuation,
         test_font_tiers,
+        test_phrases_restent_entieres,
+        test_cartes_couvrent_leur_enonce,
         test_timings,
         test_envelope_follows_audio,
         test_timeline_payload,

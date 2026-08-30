@@ -1,8 +1,12 @@
 """Synthèse française segment par segment (Voxtral TTS / MLX).
 
 Contrairement au projet de doublage, ici il n'y a pas de timeline imposée:
-c'est la durée réelle de chaque segment audio qui DÉFINIT le timing de la
+c'est la durée réelle de chaque énoncé audio qui DÉFINIT le timing de la
 vidéo. Pas de time-stretch, donc, et pas de risque de débordement.
+
+On synthétise des ÉNONCÉS (des phrases entières), pas des cartes: la voix
+garde ainsi son intonation d'un bout à l'autre de la phrase. Les cartes
+d'affichage sont ensuite réparties dans la durée obtenue.
 """
 
 from __future__ import annotations
@@ -12,7 +16,7 @@ from pathlib import Path
 import numpy as np
 import soundfile as sf
 
-from .segment import TextSegment
+from .segment import TextSegment, Utterance
 
 SAMPLE_RATE = 24_000
 DEFAULT_MODEL = "mlx-community/Voxtral-4B-TTS-2603-mlx-bf16"
@@ -134,58 +138,82 @@ def _reusable(dest: Path, text: str) -> np.ndarray | None:
 
 
 def synthesize(
-    segments: list[TextSegment],
+    units: list[Utterance],
     workdir: Path,
     *,
     model_id: str = DEFAULT_MODEL,
     voice: str = "fr_male",
     reuse: bool = True,
     on_progress=None,
-) -> list[TextSegment]:
-    """Synthétise chaque segment, en reprenant le travail déjà fait.
+) -> list[Utterance]:
+    """Synthétise chaque énoncé, en reprenant le travail déjà fait.
 
     Avec *reuse*, un .wav déjà présent et de durée plausible est conservé:
-    une relance ne régénère que les segments manquants ou dérivés, au lieu de
+    une relance ne régénère que les énoncés manquants ou dérivés, au lieu de
     reprendre les vingt minutes depuis le début.
     """
     workdir.mkdir(parents=True, exist_ok=True)
     model = None  # chargé à la première synthèse réellement nécessaire
 
-    for i, seg in enumerate(segments, start=1):
-        dest = workdir / f"seg_{seg.index:04d}.wav"
-        audio = _reusable(dest, seg.text) if reuse else None
+    for i, unit in enumerate(units, start=1):
+        dest = workdir / f"seg_{unit.index:04d}.wav"
+        audio = _reusable(dest, unit.text) if reuse else None
 
         if audio is None:
             if model is None:
                 model = _load_model(model_id)
-            audio = _generate_one(model, seg.text, voice)
+            audio = _generate_one(model, unit.text, voice)
             sf.write(dest, audio, SAMPLE_RATE)
-            dest.with_suffix(".txt").write_text(seg.text, encoding="utf-8")
+            dest.with_suffix(".txt").write_text(unit.text, encoding="utf-8")
 
-        seg.audio_path = str(dest)
-        seg.duration = len(audio) / SAMPLE_RATE
+        unit.audio_path = str(dest)
+        unit.duration = len(audio) / SAMPLE_RATE
         if on_progress:
-            on_progress(i, len(segments))
+            on_progress(i, len(units))
 
-    return segments
+    return units
+
+
+def _spread_cards(unit) -> None:
+    """Étale les cartes d'affichage sur la durée de l'énoncé.
+
+    Le partage est proportionnel au nombre de caractères: c'est la meilleure
+    approximation du rythme de lecture dont on dispose sans alignement forcé
+    sur la forme d'onde. La dernière carte absorbe le reste, pour que les
+    cartes couvrent exactement l'audio malgré les arrondis.
+    """
+    cards = getattr(unit, "cards", None)
+    if not cards:
+        return
+
+    total = sum(len(card.text) for card in cards) or 1
+    cursor = unit.start
+    for card in cards[:-1]:
+        card.start = cursor
+        card.duration = unit.duration * len(card.text) / total
+        cursor += card.duration
+
+    cards[-1].start = cursor
+    cards[-1].duration = max(0.0, unit.end - cursor)
 
 
 def assign_timings(
-    segments: list[TextSegment],
+    units: list[Utterance] | list[TextSegment],
     *,
     gap: float = GAP_BETWEEN,
     lead_in: float = LEAD_IN,
-) -> list[TextSegment]:
-    """Pose les segments bout à bout et renvoie la liste horodatée."""
+):
+    """Pose les énoncés bout à bout et horodate leurs cartes."""
     cursor = lead_in
-    for seg in segments:
-        seg.start = cursor
-        cursor += seg.duration + gap
-    return segments
+    for unit in units:
+        unit.start = cursor
+        cursor += unit.duration + gap
+        _spread_cards(unit)
+    return units
 
 
 def concatenate(
-    segments: list[TextSegment],
+    segments: list[Utterance] | list[TextSegment],
     dest: Path,
     *,
     tail: float = TAIL,

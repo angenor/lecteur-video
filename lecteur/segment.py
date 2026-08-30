@@ -7,6 +7,16 @@ Les contraintes viennent directement de la maquette:
 
 La taille de police s'adapte à la longueur pour absorber les segments
 qu'on ne peut pas raccourcir sans casser le sens.
+
+Deux découpages cohabitent, et il ne faut pas les confondre:
+
+  - l'ÉNONCÉ (`Utterance`) est l'unité de synthèse. C'est une phrase entière,
+    lue d'un trait, pour que la voix garde son intonation et ne marque pas de
+    pause au milieu d'un groupe de sens;
+  - la CARTE (`TextSegment`) est l'unité d'affichage, bornée par le gabarit.
+
+Une phrase de 200 caractères se lit donc d'une seule traite, et son texte
+défile en trois cartes réparties sur la durée de l'audio.
 """
 
 from __future__ import annotations
@@ -16,6 +26,15 @@ from dataclasses import dataclass, asdict, field
 
 MAX_CHARS = 90
 MIN_CHARS = 25  # en dessous, on préfère recoller au segment voisin
+
+# Limite de l'unité de synthèse. Rien à voir avec le gabarit: c'est la
+# mémoire GPU qui commande. Le modèle décode toutes ses frames en un seul
+# buffer, et Metal refuse toute allocation unique au-delà de max_buffer_length
+# (10,7 Go sur M3 Pro) — c'est ce mur qu'on a heurté à 4096 frames, avec une
+# demande de 28 Go. Le point de rupture est donc vers 1500 frames (~2 min
+# d'audio). 400 caractères, soit une trentaine de secondes, laissent une marge
+# large tout en gardant entières les phrases françaises les plus longues.
+MAX_SPEECH_CHARS = 400
 
 # (longueur max, taille de police) — cohérent avec le gabarit corrigé
 FONT_TIERS = ((60, 70), (90, 60), (10_000, 52))
@@ -42,6 +61,22 @@ class TextSegment:
         d = asdict(self)
         d["chars"] = len(self.text)
         return d
+
+
+@dataclass
+class Utterance:
+    """Unité de synthèse: une phrase, lue d'un trait, et ses cartes."""
+
+    index: int
+    text: str
+    cards: list[TextSegment] = field(default_factory=list)
+    start: float = 0.0
+    duration: float = 0.0
+    audio_path: str | None = None
+
+    @property
+    def end(self) -> float:
+        return self.start + self.duration
 
 
 def font_size_for(text: str) -> int:
@@ -181,24 +216,62 @@ def _merge_stubs(pieces: list[str], max_chars: int) -> list[str]:
     return out
 
 
-def segment(text: str, *, max_chars: int = MAX_CHARS) -> list[TextSegment]:
-    """Texte brut -> segments prêts pour la synthèse et l'affichage."""
-    paragraphs = [p.strip() for p in text.split("\n\n") if p.strip()]
-    pieces: list[str] = []
-
-    for paragraph in paragraphs:
+def sentences(text: str) -> list[str]:
+    """Texte brut -> phrases, paragraphe par paragraphe."""
+    out: list[str] = []
+    for paragraph in (p.strip() for p in text.split("\n\n")):
+        if not paragraph:
+            continue
         for sentence in SENTENCE_SPLIT.split(paragraph):
             sentence = sentence.strip()
             if sentence:
-                # fusion confinée à la phrase, pour ne jamais franchir un point
-                pieces.extend(
-                    _merge_stubs(_split_long(sentence, max_chars), max_chars)
-                )
+                out.append(sentence)
+    return out
 
-    segments: list[TextSegment] = []
-    for i, piece in enumerate(pieces):
-        seg = TextSegment(index=i, text=piece, font_size=font_size_for(piece))
-        if len(piece) > max_chars:
-            seg.notes.append(f"dépasse la limite: {len(piece)} caractères")
-        segments.append(seg)
-    return segments
+
+def cards_for(text: str, max_chars: int = MAX_CHARS) -> list[str]:
+    """Découpe un énoncé en cartes affichables dans le gabarit."""
+    return _merge_stubs(_split_long(text, max_chars), max_chars)
+
+
+def utterances(
+    text: str,
+    *,
+    max_chars: int = MAX_CHARS,
+    max_speech: int = MAX_SPEECH_CHARS,
+) -> list[Utterance]:
+    """Texte brut -> énoncés à synthétiser, chacun portant ses cartes.
+
+    La phrase reste entière tant qu'elle tient dans le budget de synthèse;
+    au-delà, on la coupe sur sa ponctuation faible plutôt que d'imposer à la
+    voix les coupures du gabarit.
+    """
+    units: list[Utterance] = []
+    card_index = 0
+
+    for sentence in sentences(text):
+        for speech in _split_long(sentence, max_speech):
+            unit = Utterance(index=len(units), text=speech)
+            for piece in cards_for(speech, max_chars):
+                card = TextSegment(
+                    index=card_index, text=piece, font_size=font_size_for(piece)
+                )
+                if len(piece) > max_chars:
+                    card.notes.append(
+                        f"dépasse la limite: {len(piece)} caractères"
+                    )
+                unit.cards.append(card)
+                card_index += 1
+            units.append(unit)
+
+    return units
+
+
+def all_cards(units: list[Utterance]) -> list[TextSegment]:
+    """Les cartes de tous les énoncés, à plat et dans l'ordre."""
+    return [card for unit in units for card in unit.cards]
+
+
+def segment(text: str, *, max_chars: int = MAX_CHARS) -> list[TextSegment]:
+    """Texte brut -> cartes d'affichage, à plat."""
+    return all_cards(utterances(text, max_chars=max_chars))

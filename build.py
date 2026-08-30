@@ -6,7 +6,7 @@
 
 Produit dans le dossier de sortie:
     texte.txt        le texte extrait, relisible et corrigeable
-    segments.json    le découpage avec tailles de police
+    segments.json    les cartes d'affichage avec tailles de police
     voix.wav         la piste audio complète
     video-data.json  le contrat consommé par la composition Remotion
 """
@@ -85,7 +85,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--max-chars", type=int, default=SEG.MAX_CHARS,
                    help="Longueur max d'un segment (contrainte du gabarit)")
     p.add_argument("--gap", type=float, default=TTS.GAP_BETWEEN,
-                   help="Silence entre deux segments, en secondes")
+                   help="Silence entre deux énoncés, en secondes")
     p.add_argument("--fps", type=int, default=TL.FPS)
 
     p.add_argument("--render", action="store_true",
@@ -135,17 +135,18 @@ def main(argv: list[str] | None = None) -> int:
     done(t)
 
     # 2. Découpage
-    t = step(2, "Découpage en segments")
-    segments = SEG.segment(text, max_chars=args.max_chars)
+    t = step(2, "Découpage")
+    units = SEG.utterances(text, max_chars=args.max_chars)
+    segments = SEG.all_cards(units)
     tiers: dict[int, int] = {}
     for s in segments:
         tiers[s.font_size] = tiers.get(s.font_size, 0) + 1
-    print(f"  {len(segments)} segments")
+    print(f"  {len(units)} énoncés à lire, {len(segments)} cartes à afficher")
     for size in sorted(tiers, reverse=True):
         print(f"    {size}px : {tiers[size]}")
     over = [s for s in segments if s.notes]
     if over:
-        print(f"  {len(over)} segment(s) au-delà de la limite, à vérifier")
+        print(f"  {len(over)} carte(s) au-delà de la limite, à vérifier")
     done(t)
 
     if args.text_only:
@@ -158,14 +159,14 @@ def main(argv: list[str] | None = None) -> int:
     # 3. Synthèse
     t = step(3, "Synthèse vocale française")
     TTS.synthesize(
-        segments, outdir / "audio",
+        units, outdir / "audio",
         model_id=args.tts_model,
         voice=TTS.VOICES[args.voice],
         reuse=not args.fresh,
-        on_progress=progress("segments"),
+        on_progress=progress("énoncés"),
     )
-    TTS.assign_timings(segments, gap=args.gap)
-    _, total = TTS.concatenate(segments, audio_path)
+    TTS.assign_timings(units, gap=args.gap)
+    _, total = TTS.concatenate(units, audio_path)
     print(f"  durée totale: {total:.1f}s ({total / 60:.1f} min)")
     done(t)
 
