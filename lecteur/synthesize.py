@@ -27,7 +27,12 @@ CHARS_PER_SECOND = 12.0       # débit de parole française, estimation prudente
 LENGTH_SAFETY = 3.0           # marge tolérée au-delà de la durée attendue
 MIN_FRAMES = 120              # plancher, pour les segments très courts
 MODEL_MAX_FRAMES = 4096       # plafond du modèle
-RETRY_TEMPERATURES = (0.8, 0.4, 0.15)
+# Température du modèle. Mesurée sur des générations répétées: la baisser ne
+# stabilise rien, elle dégrade le premier mot — à 0,15 le modèle a rendu "samé"
+# puis "mes amis" pour "Chers amis", à 0,5 il a préfixé un "c'est feu" inventé.
+# On garde donc la valeur par défaut du modèle et on se contente de retirer.
+TEMPERATURE = 0.8
+RETRY_ATTEMPTS = 3
 DRIFT_FACTOR = 1.8            # au-delà, la voix a dérivé
 
 GAP_BETWEEN = 0.28  # respiration entre deux segments, en secondes
@@ -85,10 +90,10 @@ def _generate_one(model, text: str, voice: str) -> np.ndarray:
     budget = _frame_budget(text)
     shortest: np.ndarray | None = None
 
-    for temperature in RETRY_TEMPERATURES:
+    for essai in range(RETRY_ATTEMPTS):
         chunks: list[np.ndarray] = []
         for result in model.generate(
-            text=text, voice=voice, max_tokens=budget, temperature=temperature
+            text=text, voice=voice, max_tokens=budget, temperature=TEMPERATURE
         ):
             chunks.append(np.asarray(result.audio, dtype=np.float32))
         if not chunks:
@@ -103,7 +108,7 @@ def _generate_one(model, text: str, voice: str) -> np.ndarray:
 
         print(
             f"\n  voix dérivée sur {text[:40]!r} "
-            f"(temperature={temperature}), nouvelle tentative"
+            f"(essai {essai + 1}/{RETRY_ATTEMPTS}), nouveau tirage"
         )
 
     if shortest is None:
